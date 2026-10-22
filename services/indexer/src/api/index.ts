@@ -29,6 +29,7 @@ import {
 import { PostgresDatabase } from "../postgres-db";
 import { HealthMonitor } from "../services/health-monitor";
 import { metricsText } from "../metrics";
+import { QueryCache } from "../cache";
 
 let warnedMissingAllowedOrigins = false;
 
@@ -84,7 +85,8 @@ export function createApp(
   pg?: PgPool,
   healthMonitor?: HealthMonitor,
   shutdownState?: { active: boolean },
-  mediaUpload?: MediaUploadConfig
+  mediaUpload?: MediaUploadConfig,
+  queryCache?: QueryCache
 ): express.Application {
   const app = express();
   app.use(helmet());
@@ -198,14 +200,14 @@ export function createApp(
     next();
   });
 
-  app.use("/api/profiles", createProfilesRouter(db));
+  app.use("/api/profiles", createProfilesRouter(db, queryCache));
   app.use("/api/posts", createPostsRouter(db, mediaUpload));
   app.use("/api/search", createSearchRouter(db));
   app.use("/api/follows", createFollowsRouter(db));
   app.use("/api/pools", createPoolsRouter(db));
   app.use("/api/governance", createGovernanceRouter(db));
   app.use("/api/users", createUsersRouter(db));
-  app.use("/api/feed", createFeedRouter(pg ?? db));
+  app.use("/api/feed", createFeedRouter(pg ?? db, queryCache));
 
   const notificationService = pg
     ? new NotificationService({ deviceTokenStore: new PostgresDeviceTokenStore(pg) })

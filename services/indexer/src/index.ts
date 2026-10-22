@@ -38,6 +38,8 @@ import { GracefulShutdown } from "./graceful-shutdown";
 import { logger } from "./logger";
 import { initRateLimiter } from "./middleware/rateLimit";
 import { RawEventsRetentionManager } from "./retention";
+import { RedisQueryCache } from "./cache";
+import { assertSchemaVersion } from "./schema-version";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -96,6 +98,7 @@ const notificationService = new NotificationService({
 });
 const scoreRefreshService = new ScoreRefreshService(pgPool, SCORE_REFRESH_INTERVAL_MINUTES);
 const rawEventsRetentionManager = new RawEventsRetentionManager(pgPool, cfg.rawEventsRetention);
+const queryCache = new RedisQueryCache(process.env.REDIS_URL);
 
 /**
  * Idempotently ensure the staging table and cursor exist. Mirrors
@@ -318,11 +321,27 @@ const healthMonitor = new HealthMonitor(pgPool, STELLAR_RPC_URL);
 const abortController = new AbortController();
 const shutdownFlag = { active: false };
 
-const apiApp = createApp(new PostgresDatabase(pgPool), pgPool, healthMonitor, shutdownFlag);
+const apiApp = createApp(
+  new PostgresDatabase(pgPool),
+  pgPool,
+  healthMonitor,
+  shutdownFlag,
+  undefined,
+  queryCache
+);
 const httpServer = http.createServer(apiApp);
 
 const wsHandle = attachWebSocketServer(httpServer, bus, { path: "/ws" });
 const detachNotificationDispatcher = attachNotificationDispatcher(bus, pgPool, notificationService);
+const detachQueryCacheInvalidation = bus.onAny((event) => {
+  const eventType = event.type.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+  if (eventType === "post_created" || eventType === "post_deleted") {
+    void queryCache.invalidateFeed();
+  }
+  if (eventType === "profile_set" || eventType === "profile_deleted") {
+    void queryCache.invalidateProfiles();
+  }
+});
 
 // ── Lifecycle control ────────────────────────────────────────────────────────
 
@@ -333,6 +352,8 @@ const gracefulShutdown = new GracefulShutdown({
   abortController,
   scoreRefreshStop: () => scoreRefreshService.stop(),
   detachNotificationDispatcher,
+  detachQueryCacheInvalidation,
+  closeQueryCache: () => queryCache.close(),
   shutdownTimeoutMs: cfg.shutdownTimeoutMs,
   onSignal: (signal) => {
     logger.info({ signal }, "Graceful shutdown initiated");
@@ -357,6 +378,7 @@ async function main(): Promise<void> {
   // Initialise HTTP rate limiter (upgrades to Redis store when REDIS_URL is set).
   await initRateLimiter();
 
+  await ensureSchema();
   await assertSchemaVersion(pgPool);
 
   const pipeline = new IngestPipeline(pgPool, {

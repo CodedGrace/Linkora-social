@@ -10,6 +10,8 @@ export interface GracefulShutdownOptions {
   abortController: AbortController;
   scoreRefreshStop: () => void;
   detachNotificationDispatcher: () => void;
+  detachQueryCacheInvalidation?: () => void;
+  closeQueryCache?: () => Promise<void>;
   shutdownTimeoutMs?: number;
   onSignal?: (signal: string) => void;
   shutdownFlag?: { active: boolean };
@@ -22,6 +24,8 @@ export class GracefulShutdown {
   private readonly abortController: AbortController;
   private readonly scoreRefreshStop: () => void;
   private readonly detachNotificationDispatcher: () => void;
+  private readonly detachQueryCacheInvalidation?: () => void;
+  private readonly closeQueryCache?: () => Promise<void>;
   private readonly shutdownTimeoutMs: number;
   private readonly onSignal?: (signal: string) => void;
   private readonly shutdownFlag?: { active: boolean };
@@ -37,6 +41,8 @@ export class GracefulShutdown {
     this.abortController = opts.abortController;
     this.scoreRefreshStop = opts.scoreRefreshStop;
     this.detachNotificationDispatcher = opts.detachNotificationDispatcher;
+    this.detachQueryCacheInvalidation = opts.detachQueryCacheInvalidation;
+    this.closeQueryCache = opts.closeQueryCache;
     this.shutdownTimeoutMs = opts.shutdownTimeoutMs ?? 30_000;
     this.onSignal = opts.onSignal;
     this.shutdownFlag = opts.shutdownFlag;
@@ -80,6 +86,7 @@ export class GracefulShutdown {
 
     this.scoreRefreshStop();
     this.detachNotificationDispatcher();
+    this.detachQueryCacheInvalidation?.();
 
     this.abortController.abort();
 
@@ -113,7 +120,8 @@ export class GracefulShutdown {
     });
 
     try {
-      await Promise.race([Promise.all([wsClose, pgClose]), timeout]);
+      const cacheClose = this.closeQueryCache?.() ?? Promise.resolve();
+      await Promise.race([Promise.all([wsClose, pgClose, cacheClose]), timeout]);
       if (timeoutId) clearTimeout(timeoutId);
       logger.info({ signal }, "Shutdown complete");
       process.exit(0);
