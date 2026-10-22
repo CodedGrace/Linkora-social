@@ -3,6 +3,7 @@ import {
   type NotificationChannel,
   type UserNotificationPreferences,
 } from "./preferences";
+import { NotificationQueue } from "./queue";
 
 export interface NotificationPayload {
   id: string;
@@ -53,7 +54,8 @@ export function getEnabledChannels(
  */
 export async function dispatch(
   payload: NotificationPayload,
-  sender: ChannelSender = defaultSender
+  sender: ChannelSender = defaultSender,
+  options: { maxAttempts?: number } = {}
 ): Promise<DispatchResult[]> {
   const preferences = await getUserPreferences(payload.recipient);
   const enabledChannels = getEnabledChannels(preferences);
@@ -64,7 +66,7 @@ export async function dispatch(
   await Promise.all(
     enabledChannels.map(async (channel) => {
       let attempts = 0;
-      const maxAttempts = 3;
+      const maxAttempts = options.maxAttempts ?? 3;
       let lastError: Error | undefined;
 
       while (attempts < maxAttempts) {
@@ -121,4 +123,18 @@ export async function dispatch(
   );
 
   return results;
+}
+
+export const notificationQueue = new NotificationQueue<NotificationPayload>(async (payload) => {
+  const results = await dispatch(payload, defaultSender, { maxAttempts: 1 });
+  const failed = results.filter((result) => !result.success);
+  if (failed.length > 0) {
+    throw new Error(
+      `Notification delivery failed for ${failed.map((result) => result.channel).join(", ")}`
+    );
+  }
+});
+
+export function enqueueNotification(payload: NotificationPayload): string {
+  return notificationQueue.enqueue(payload);
 }
