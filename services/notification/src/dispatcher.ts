@@ -3,6 +3,7 @@ import {
   UserNotificationPreferences,
   getUserPreferences,
 } from "./preferences";
+import { NotificationQueue } from "./queue";
 
 export interface NotificationPayload {
   title: string;
@@ -152,4 +153,18 @@ export async function dispatch(
   );
 
   return { userAddress, results };
+}
+
+export const notificationQueue = new NotificationQueue<NotificationPayload>(async (payload) => {
+  const results = await dispatch(payload, defaultSender, { maxAttempts: 1 });
+  const failed = results.filter((result) => !result.success);
+  if (failed.length > 0) {
+    throw new Error(
+      `Notification delivery failed for ${failed.map((result) => result.channel).join(", ")}`
+    );
+  }
+});
+
+export function enqueueNotification(payload: NotificationPayload): string {
+  return notificationQueue.enqueue(payload);
 }
