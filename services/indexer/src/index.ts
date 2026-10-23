@@ -38,6 +38,8 @@ import { GracefulShutdown } from "./graceful-shutdown";
 import { logger } from "./logger";
 import { initRateLimiter } from "./middleware/rateLimit";
 import { RawEventsRetentionManager } from "./retention";
+import { WebhookDispatcher } from "./webhooks";
+import { assertSchemaVersion } from "./schema-version";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -96,6 +98,7 @@ const notificationService = new NotificationService({
 });
 const scoreRefreshService = new ScoreRefreshService(pgPool, SCORE_REFRESH_INTERVAL_MINUTES);
 const rawEventsRetentionManager = new RawEventsRetentionManager(pgPool, cfg.rawEventsRetention);
+const webhookDispatcher = new WebhookDispatcher(pgPool);
 
 /**
  * Idempotently ensure the staging table and cursor exist. Mirrors
@@ -318,7 +321,14 @@ const healthMonitor = new HealthMonitor(pgPool, STELLAR_RPC_URL);
 const abortController = new AbortController();
 const shutdownFlag = { active: false };
 
-const apiApp = createApp(new PostgresDatabase(pgPool), pgPool, healthMonitor, shutdownFlag);
+const apiApp = createApp(
+  new PostgresDatabase(pgPool),
+  pgPool,
+  healthMonitor,
+  shutdownFlag,
+  undefined,
+  webhookDispatcher
+);
 const httpServer = http.createServer(apiApp);
 
 const wsHandle = attachWebSocketServer(httpServer, bus, { path: "/ws" });
@@ -333,6 +343,7 @@ const gracefulShutdown = new GracefulShutdown({
   abortController,
   scoreRefreshStop: () => scoreRefreshService.stop(),
   detachNotificationDispatcher,
+  stopWebhookDispatcher: () => webhookDispatcher.stop(),
   shutdownTimeoutMs: cfg.shutdownTimeoutMs,
   onSignal: (signal) => {
     logger.info({ signal }, "Graceful shutdown initiated");
@@ -357,7 +368,9 @@ async function main(): Promise<void> {
   // Initialise HTTP rate limiter (upgrades to Redis store when REDIS_URL is set).
   await initRateLimiter();
 
+  await ensureSchema();
   await assertSchemaVersion(pgPool);
+  webhookDispatcher.start();
 
   const pipeline = new IngestPipeline(pgPool, {
     streamId: CONTRACT_ID,
@@ -367,6 +380,18 @@ async function main(): Promise<void> {
       notificationService,
       new PostgresDatabase(pgPool)
     ),
+    onBeforeCommit: async (client, events) => {
+      for (const event of events) {
+        await webhookDispatcher.enqueue(client, {
+          type: event.type,
+          ledgerSequence: event.ledgerSequence,
+          eventIndex: event.eventIndex,
+          contractId: event.contractId,
+          topic: event.topic,
+          data: event.data,
+        });
+      }
+    },
     // Update the state root incrementally from the batch delta — O(batch_size)
     // instead of the old O(table_size) full scan.  The root is written to
     // indexer_state after the domain transaction has already committed, so it

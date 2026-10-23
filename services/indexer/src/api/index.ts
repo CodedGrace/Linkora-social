@@ -29,6 +29,7 @@ import {
 import { PostgresDatabase } from "../postgres-db";
 import { HealthMonitor } from "../services/health-monitor";
 import { metricsText } from "../metrics";
+import { createWebhooksRouter, WebhookDispatcher } from "../webhooks";
 
 let warnedMissingAllowedOrigins = false;
 
@@ -84,7 +85,8 @@ export function createApp(
   pg?: PgPool,
   healthMonitor?: HealthMonitor,
   shutdownState?: { active: boolean },
-  mediaUpload?: MediaUploadConfig
+  mediaUpload?: MediaUploadConfig,
+  webhookDispatcher?: WebhookDispatcher
 ): express.Application {
   const app = express();
   app.use(helmet());
@@ -206,6 +208,9 @@ export function createApp(
   app.use("/api/governance", createGovernanceRouter(db));
   app.use("/api/users", createUsersRouter(db));
   app.use("/api/feed", createFeedRouter(pg ?? db));
+  if (webhookDispatcher) {
+    app.use("/api/webhooks", createWebhooksRouter(webhookDispatcher));
+  }
 
   const notificationService = pg
     ? new NotificationService({ deviceTokenStore: new PostgresDeviceTokenStore(pg) })
